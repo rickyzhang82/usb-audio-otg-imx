@@ -1,0 +1,1963 @@
+diff --git a/drivers/usb/gadget/arcotg_udc.c b/drivers/usb/gadget/arcotg_udc.c
+index a7aac40..10e423d 100644
+--- a/drivers/usb/gadget/arcotg_udc.c
++++ b/drivers/usb/gadget/arcotg_udc.c
+@@ -842,6 +842,7 @@ fsl_alloc_request(struct usb_ep *_ep, gfp_t gfp_flags)
+ 
+ 	req->req.dma = DMA_ADDR_INVALID;
+ 	pr_debug("udc: req=0x%p   set req.dma=0x%x\n", req, req->req.dma);
++	//printk("udc: alloc req=0x%p \n", req);
+ 	INIT_LIST_HEAD(&req->queue);
+ 
+ 	return &req->req;
+@@ -851,6 +852,7 @@ static void fsl_free_request(struct usb_ep *_ep, struct usb_request *_req)
+ {
+ 	struct fsl_req *req = NULL;
+ 
++	//printk("udc: free req=0x%p \n", _req);
+ 	req = container_of(_req, struct fsl_req, req);
+ 
+ 	if (_req)
+@@ -1068,13 +1070,15 @@ fsl_ep_queue(struct usb_ep *_ep, struct usb_request *_req, gfp_t gfp_flags)
+ 	unsigned long flags;
+ 	int is_iso = 0;
+ 
+-	spin_lock_irqsave(&udc->lock, flags);
+ 
+ 	if (!_ep || !ep->desc) {
+ 		VDBG("%s, bad ep\n", __func__);
+-		spin_unlock_irqrestore(&udc->lock, flags);
+ 		return -EINVAL;
+ 	}
++
++	udc = ep->udc;
++	spin_lock_irqsave(&udc->lock, flags);
++
+ 	/* catch various bogus parameters */
+ 	if (!_req || !req->req.buf || (ep_index(ep)
+ 				      && !list_empty(&req->queue))) {
+@@ -1090,7 +1094,6 @@ fsl_ep_queue(struct usb_ep *_ep, struct usb_request *_req, gfp_t gfp_flags)
+ 		is_iso = 1;
+ 	}
+ 
+-	udc = ep->udc;
+ 	if (!udc->driver || udc->gadget.speed == USB_SPEED_UNKNOWN) {
+ 		spin_unlock_irqrestore(&udc->lock, flags);
+ 		return -ESHUTDOWN;
+@@ -1145,6 +1148,7 @@ static int fsl_ep_dequeue(struct usb_ep *_ep, struct usb_request *_req)
+ 	struct fsl_req *req;
+ 	unsigned long flags;
+ 	int ep_num, stopped, ret = 0;
++	struct fsl_udc *udc = NULL;
+ 	u32 epctrl;
+ 
+ 	if (!_ep || !_req)
+@@ -1152,6 +1156,11 @@ static int fsl_ep_dequeue(struct usb_ep *_ep, struct usb_request *_req)
+ 
+ 	spin_lock_irqsave(&ep->udc->lock, flags);
+ 	stopped = ep->stopped;
++	udc = ep->udc;
++	if (!udc->driver || udc->gadget.speed == USB_SPEED_UNKNOWN) {
++		spin_unlock_irqrestore(&ep->udc->lock, flags);
++		return -ESHUTDOWN;
++	}
+ 
+ 	/* Stop the ep before we deal with the queue */
+ 	ep->stopped = 1;
+@@ -1599,8 +1608,10 @@ static void setup_received_irq(struct fsl_udc *udc,
+ 		if (setup->bRequestType & USB_DIR_IN) {
+ 			dir = EP_DIR_OUT;
+ 		}
++		spin_unlock(&udc->lock);
+ 		if (ep0_prime_status(udc, dir))
+ 			ep0stall(udc);
++		spin_lock(&udc->lock);
+ 	}
+ 	/* We process some stardard setup requests here */
+ 	switch (setup->bRequest) {
+@@ -1609,7 +1620,9 @@ static void setup_received_irq(struct fsl_udc *udc,
+ 		if ((setup->bRequestType & (USB_DIR_IN | USB_TYPE_MASK))
+ 					!= (USB_DIR_IN | USB_TYPE_STANDARD))
+ 			break;
++		spin_unlock(&udc->lock);
+ 		ch9getstatus(udc, setup->bRequestType, wValue, wIndex, wLength);
++		spin_lock(&udc->lock);
+ 		return;
+ 
+ 	case USB_REQ_SET_ADDRESS:
+@@ -1617,10 +1630,14 @@ static void setup_received_irq(struct fsl_udc *udc,
+ 		if (setup->bRequestType != (USB_DIR_OUT | USB_TYPE_STANDARD
+ 						| USB_RECIP_DEVICE))
+ 			break;
++		spin_unlock(&udc->lock);
+ 		ch9setaddress(udc, wValue, wIndex, wLength);
++		spin_lock(&udc->lock);
+ 		return;
+ 	case USB_REQ_SET_CONFIGURATION:
++		spin_unlock(&udc->lock);
+ 		fsl_vbus_draw(gadget, mA);
++		spin_lock(&udc->lock);
+ 	     break;
+ 	case USB_REQ_CLEAR_FEATURE:
+ 	case USB_REQ_SET_FEATURE:
+@@ -1667,8 +1684,10 @@ static void setup_received_irq(struct fsl_udc *udc,
+ 			break;
+ 
+ 		if (rc == 0) {
++			spin_unlock(&udc->lock);
+ 			if (ep0_prime_status(udc, EP_DIR_IN))
+ 				ep0stall(udc);
++			spin_lock(&udc->lock);
+ 		}
+ 		if (ptc) {
+ 			u32 tmp;
+@@ -1858,6 +1877,12 @@ static int process_ep_req(struct fsl_udc *udc, int pipe,
+ 		if (errors) {
+ 			if (errors & DTD_STATUS_HALTED) {
+ 				ERR("dTD error %08x QH=%d\n", errors, pipe);
++				ERR("curr_td->size_ioc_sts is 0x%x\n", curr_td->size_ioc_sts);
++				ERR("curr_td->buff_ptr0 is 0x%x\n", curr_td->buff_ptr0);
++				ERR("curr_td->buff_ptr1 is 0x%x\n", curr_td->buff_ptr1);
++				ERR("curr_td->buff_ptr2 is 0x%x\n", curr_td->buff_ptr2);
++				ERR("curr_td->buff_ptr3 is 0x%x\n", curr_td->buff_ptr3);
++				ERR("curr_td->buff_ptr4 is 0x%x\n", curr_td->buff_ptr4);
+ 				/* Clear the errors and Halt condition */
+ 				tmp = hc32_to_cpu(curr_qh->size_ioc_int_sts);
+ 				tmp &= ~errors;
+@@ -1950,6 +1975,9 @@ static void dtd_complete_irq(struct fsl_udc *udc)
+ 				queue) {
+ 			status = process_ep_req(udc, i, curr_req);
+ 
++			if (status == -EPIPE)
++			ERR("status of process_ep_req= %d, ep = %d, addr is 0x%x",
++					status, ep_num, fsl_readl(&dr_regs->deviceaddr));
+ 			VDBG("status of process_ep_req= %d, ep = %d",
+ 					status, ep_num);
+ 			if (status == REQ_UNCOMPLETE)
+diff --git a/drivers/usb/gadget/audio.c b/drivers/usb/gadget/audio.c
+index 76ad9be..8ab891d 100644
+--- a/drivers/usb/gadget/audio.c
++++ b/drivers/usb/gadget/audio.c
+@@ -36,7 +36,16 @@
+ #include "config.c"
+ #include "epautoconf.c"
+ 
++#ifdef PLAYBACK
++#undef PLAYBACK
++#endif
++
++//#define PLAYBACK    1
++
++#ifdef PLAYBACK
+ #include "u_audio.c"
++#endif
++
+ #include "f_audio.c"
+ 
+ /*-------------------------------------------------------------------------*/
+@@ -161,7 +170,9 @@ fail:
+ 
+ static int __exit audio_unbind(struct usb_composite_dev *cdev)
+ {
++#ifdef PLAYBACK
+ 	gaudio_cleanup();
++#endif
+ 	return 0;
+ }
+ 
+diff --git a/drivers/usb/gadget/f_audio.c b/drivers/usb/gadget/f_audio.c
+index b91115f..b150b1c 100644
+--- a/drivers/usb/gadget/f_audio.c
++++ b/drivers/usb/gadget/f_audio.c
+@@ -12,22 +12,67 @@
+ #include <linux/slab.h>
+ #include <linux/kernel.h>
+ #include <linux/device.h>
++#include <linux/fs.h>
++#include <linux/pagemap.h>
++#include <linux/clk.h>
+ #include <asm/atomic.h>
+ 
++#include <linux/list.h>
++
+ #include "u_audio.h"
+ 
+-#define OUT_EP_MAX_PACKET_SIZE	200
+-static int req_buf_size = OUT_EP_MAX_PACKET_SIZE;
+-module_param(req_buf_size, int, S_IRUGO);
+-MODULE_PARM_DESC(req_buf_size, "ISO OUT endpoint request buffer size");
+ 
+-static int req_count = 256;
+-module_param(req_count, int, S_IRUGO);
+-MODULE_PARM_DESC(req_count, "ISO OUT endpoint request count");
++//#define SHOW_RINGBUFLEN  1
++
++/* PCM format hardcode to 'little end 16 bits' */
++
++#define OUT_EP_ALIGN            (2 * out_channel)        /* as channel x per sample bytes 2 x 2 = 4 */
++#define IN_EP_ALIGN             (2 * in_channel )        /* as channel x per sample bytes 2 x 2 = 4 */
++
++/* 16 bit per sample */
++#define OUT_EP_MAX_PACKET_SIZE	(192)      /* as 48k x 2 channel  for audio 4 is per sample bytes, need extra 4 ?*/
++                                           /* 48 x 4 */
++#define IN_EP_MAX_PACKET_SIZE	(32 )      /* as  8k x 2 channel  for audio 2 is per sample bytes, need extra 2 ?*/
++                                           /* 8  x 4 */
++
++static int out_sample_rate = 48000;
++module_param(out_sample_rate, int, S_IRUGO);
++MODULE_PARM_DESC(out_sample_rate, "OUT sample rate");
++
++static int out_channel = 2;
++module_param(out_channel, int, S_IRUGO);
++MODULE_PARM_DESC(out_channel, "OUT channel");
++
++
++static int in_sample_rate = 8000;
++module_param(in_sample_rate, int, S_IRUGO);
++MODULE_PARM_DESC(n_sample_rate, "IN sample rate");
++
++static int in_channel = 2;
++module_param(in_channel, int, S_IRUGO);
++MODULE_PARM_DESC(in_channel, "IN channel");
++
++static int out_req_buf_size = OUT_EP_MAX_PACKET_SIZE;
++module_param(out_req_buf_size, int, S_IRUGO);
++MODULE_PARM_DESC(out_req_buf_size, "ISO OUT endpoint request buffer size");
+ 
+-static int audio_buf_size = 48000;
++static int in_req_buf_size = IN_EP_MAX_PACKET_SIZE;
++module_param(in_req_buf_size, int, S_IRUGO);
++MODULE_PARM_DESC(in_req_buf_size, "ISO IN endpoint request buffer size");
++
++static int out_req_count = 256;                /*  OUT count */
++module_param(out_req_count, int, S_IRUGO);
++MODULE_PARM_DESC(out_req_count, "ISO OUT endpoint request count");
++
++static int in_req_count = 32;                  /*  In  count */
++module_param(in_req_count, int, S_IRUGO);
++MODULE_PARM_DESC(in_req_count, "ISO IN endpoint request count");
++
++#ifdef PLAYBACK
++static int audio_buf_size = 1024;         /* large buffer will cause pcm playback error! */
+ module_param(audio_buf_size, int, S_IRUGO);
+ MODULE_PARM_DESC(audio_buf_size, "Audio buffer size");
++#endif
+ 
+ static int generic_set_cmd(struct usb_audio_control *con, u8 cmd, int value);
+ static int generic_get_cmd(struct usb_audio_control *con, u8 cmd);
+@@ -36,14 +81,15 @@ static int generic_get_cmd(struct usb_audio_control *con, u8 cmd);
+  * DESCRIPTORS ... most are static, but strings and full
+  * configuration descriptors are built on demand.
+  */
+-
++#define GADGETAUDIOFS_MAGIC		0xaee71ee8
+ /*
+  * We have two interfaces- AudioControl and AudioStreaming
+  * TODO: only supcard playback currently
+  */
+-#define F_AUDIO_AC_INTERFACE	0
+-#define F_AUDIO_AS_INTERFACE	1
+-#define F_AUDIO_NUM_INTERFACES	2
++#define F_AUDIO_AC_INTERFACE	 0
++#define F_AUDIO_AS_INTERFACE     1
++#define F_AUDIO_AS_IN_INTERFACE	 2
++#define F_AUDIO_NUM_INTERFACES	 3
+ 
+ /* B.3.1  Standard AC Interface Descriptor */
+ static struct usb_interface_descriptor ac_interface_desc __initdata = {
+@@ -54,14 +100,14 @@ static struct usb_interface_descriptor ac_interface_desc __initdata = {
+ 	.bInterfaceSubClass =	USB_SUBCLASS_AUDIOCONTROL,
+ };
+ 
+-DECLARE_UAC_AC_HEADER_DESCRIPTOR(2);
++DECLARE_UAC_AC_HEADER_DESCRIPTOR(3);
+ 
+ #define UAC_DT_AC_HEADER_LENGTH	UAC_DT_AC_HEADER_SIZE(F_AUDIO_NUM_INTERFACES)
+-/* 1 input terminal, 1 output terminal and 1 feature unit */
+-#define UAC_DT_TOTAL_LENGTH (UAC_DT_AC_HEADER_LENGTH + UAC_DT_INPUT_TERMINAL_SIZE \
+-	+ UAC_DT_OUTPUT_TERMINAL_SIZE + UAC_DT_FEATURE_UNIT_SIZE(0))
++/* 2 input terminal, 2 output terminal and 1 feature unit */
++#define UAC_DT_TOTAL_LENGTH (UAC_DT_AC_HEADER_LENGTH + 2 * (UAC_DT_INPUT_TERMINAL_SIZE) \
++	+ 2 * (UAC_DT_OUTPUT_TERMINAL_SIZE) + UAC_DT_FEATURE_UNIT_SIZE(1))
+ /* B.3.2  Class-Specific AC Interface Descriptor */
+-static struct uac_ac_header_descriptor_v1_2 ac_header_desc = {
++static struct uac_ac_header_descriptor_v1_3 ac_header_desc = {
+ 	.bLength =		UAC_DT_AC_HEADER_LENGTH,
+ 	.bDescriptorType =	USB_DT_CS_INTERFACE,
+ 	.bDescriptorSubtype =	UAC_HEADER,
+@@ -71,6 +117,7 @@ static struct uac_ac_header_descriptor_v1_2 ac_header_desc = {
+ 	.baInterfaceNr = {
+ 		[0] =		F_AUDIO_AC_INTERFACE,
+ 		[1] =		F_AUDIO_AS_INTERFACE,
++		[2] =		F_AUDIO_AS_IN_INTERFACE,
+ 	}
+ };
+ 
+@@ -85,9 +132,21 @@ static struct uac_input_terminal_descriptor input_terminal_desc = {
+ 	.wChannelConfig =	0x3,
+ };
+ 
++#define INPUT_TERMINAL_IN_ID	2
++static struct uac_input_terminal_descriptor input_terminal_in_desc = {
++        .bLength =              UAC_DT_INPUT_TERMINAL_SIZE,
++        .bDescriptorType =      USB_DT_CS_INTERFACE,       
++        .bDescriptorSubtype =   UAC_INPUT_TERMINAL,        
++        .bTerminalID =          INPUT_TERMINAL_IN_ID,
++        .wTerminalType =        UAC_INPUT_TERMINAL_MICROPHONE,
++        .bAssocTerminal =       0, // No association.              
++	.bNrChannels   =        1, // One channel. not sync with in audio format ??
++        .wChannelConfig =     0x0, // Mono sets no position bits.
++};
++
+ DECLARE_UAC_FEATURE_UNIT_DESCRIPTOR(0);
+ 
+-#define FEATURE_UNIT_ID		2
++#define FEATURE_UNIT_ID		3
+ static struct uac_feature_unit_descriptor_0 feature_unit_desc = {
+ 	.bLength		= UAC_DT_FEATURE_UNIT_SIZE(0),
+ 	.bDescriptorType	= USB_DT_CS_INTERFACE,
+@@ -124,7 +183,8 @@ static struct usb_audio_control_selector feature_unit = {
+ 	.desc = (struct usb_descriptor_header *)&feature_unit_desc,
+ };
+ 
+-#define OUTPUT_TERMINAL_ID	3
++#define OUTPUT_TERMINAL_ID	4
++
+ static struct uac_output_terminal_descriptor_v1 output_terminal_desc = {
+ 	.bLength		= UAC_DT_OUTPUT_TERMINAL_SIZE,
+ 	.bDescriptorType	= USB_DT_CS_INTERFACE,
+@@ -135,6 +195,16 @@ static struct uac_output_terminal_descriptor_v1 output_terminal_desc = {
+ 	.bSourceID		= FEATURE_UNIT_ID,
+ };
+ 
++#define OUTPUT_TERMINAL_IN_ID	5
++static struct uac_output_terminal_descriptor_v1 output_terminal_in_desc = {
++   	.bLength		= UAC_DT_OUTPUT_TERMINAL_SIZE,
++        .bDescriptorType        = USB_DT_CS_INTERFACE,     
++        .bDescriptorSubtype     = UAC_OUTPUT_TERMINAL,     
++        .bTerminalID            = OUTPUT_TERMINAL_IN_ID,
++        .wTerminalType          = UAC_TERMINAL_STREAMING,
++        .bSourceID              = INPUT_TERMINAL_IN_ID,
++};
++
+ /* B.4.1  Standard AS Interface Descriptor */
+ static struct usb_interface_descriptor as_interface_alt_0_desc = {
+ 	.bLength =		USB_DT_INTERFACE_SIZE,
+@@ -154,6 +224,27 @@ static struct usb_interface_descriptor as_interface_alt_1_desc = {
+ 	.bInterfaceSubClass =	USB_SUBCLASS_AUDIOSTREAMING,
+ };
+ 
++static struct usb_interface_descriptor as_interface_alt_in_0_desc = {
++	.bLength =		USB_DT_INTERFACE_SIZE,
++	.bDescriptorType =	USB_DT_INTERFACE,
++	//.bInterfaceNumber =     1,  // ? Index of this interface ? bind to set this value yes
++	.bAlternateSetting =	0,
++	.bNumEndpoints =	0,
++	.bInterfaceClass =	USB_CLASS_AUDIO,
++	.bInterfaceSubClass =	USB_SUBCLASS_AUDIOSTREAMING,
++};
++
++static struct usb_interface_descriptor as_interface_alt_in_1_desc = {
++	.bLength =		USB_DT_INTERFACE_SIZE,
++	.bDescriptorType =	USB_DT_INTERFACE,
++	//.bInterfaceNumber =     1,  // ? Index of this interface ? bind to set this value yes
++	.bAlternateSetting =	1,
++	.bNumEndpoints =	1,
++	.bInterfaceClass =	USB_CLASS_AUDIO,
++	.bInterfaceSubClass =	USB_SUBCLASS_AUDIOSTREAMING,
++};
++
++
+ /* B.4.2  Class-Specific AS Interface Descriptor */
+ static struct uac_as_header_descriptor_v1 as_header_desc = {
+ 	.bLength =		UAC_DT_AS_HEADER_SIZE,
+@@ -164,6 +255,15 @@ static struct uac_as_header_descriptor_v1 as_header_desc = {
+ 	.wFormatTag =		UAC_FORMAT_TYPE_I_PCM,
+ };
+ 
++static struct uac_as_header_descriptor_v1 as_header_in_desc = {
++	.bLength =		UAC_DT_AS_HEADER_SIZE,
++	.bDescriptorType =	USB_DT_CS_INTERFACE,
++	.bDescriptorSubtype =	UAC_AS_GENERAL,
++	.bTerminalLink =	OUTPUT_TERMINAL_IN_ID,
++	.bDelay =		1,
++	.wFormatTag =		UAC_FORMAT_TYPE_I_PCM,
++};
++
+ DECLARE_UAC_FORMAT_TYPE_I_DISCRETE_DESC(1);
+ 
+ static struct uac_format_type_i_discrete_descriptor_1 as_type_i_desc = {
+@@ -176,18 +276,43 @@ static struct uac_format_type_i_discrete_descriptor_1 as_type_i_desc = {
+ 	.bSamFreqType =		1,
+ };
+ 
+-/* Standard ISO OUT Endpoint Descriptor */
+-static struct usb_endpoint_descriptor as_out_ep_desc __initdata = {
++static struct uac_format_type_i_discrete_descriptor_1 as_type_i_in_desc = {
++        .bLength =              UAC_FORMAT_TYPE_I_DISCRETE_DESC_SIZE(1),
++        .bDescriptorType =      USB_DT_CS_INTERFACE,
++        .bDescriptorSubtype =   UAC_FORMAT_TYPE,
++        .bFormatType =          UAC_FORMAT_TYPE_I,
++        .bNrChannels =          2, /* will be reset later */
++        .bSubframeSize =        2,
++        .bBitResolution =       16,
++        .bSamFreqType =         1,
++	.tSamFreq[0][0]  =      0x40, //0x01F40, // 8000Hz. ? /* will be reset later */
++	.tSamFreq[0][1]  =      0x1F, 
++	.tSamFreq[0][2]  =      0x00, 
++};
++
++/* Standard ISO OUT/IN Endpoint Descriptor */
++static struct usb_endpoint_descriptor as_out_ep_desc = {   /* remove __initdata, this data will be used as endpoint enable !  */
+ 	.bLength =		USB_DT_ENDPOINT_AUDIO_SIZE,
+ 	.bDescriptorType =	USB_DT_ENDPOINT,
+ 	.bEndpointAddress =	USB_DIR_OUT,
+ 	.bmAttributes =		USB_ENDPOINT_SYNC_ADAPTIVE
+ 				| USB_ENDPOINT_XFER_ISOC,
+ 	.wMaxPacketSize =	__constant_cpu_to_le16(OUT_EP_MAX_PACKET_SIZE),
+-	.bInterval =		4,
++	.bInterval =		4,   /* 4 in hi speed as 2 exp (4 -1) = 8 uframe time,  8 uframe time is 8 * 125 us = 1ms */
++};
++
++static struct usb_endpoint_descriptor as_in_ep_desc = {  /* remove __initdata, this data will be used as endpoint enable !  */
++	.bLength =		USB_DT_ENDPOINT_AUDIO_SIZE,
++	.bDescriptorType =	USB_DT_ENDPOINT,
++	.bEndpointAddress =	USB_DIR_IN,
++	.bmAttributes =		USB_ENDPOINT_SYNC_ADAPTIVE
++				| USB_ENDPOINT_XFER_ISOC,
++	.wMaxPacketSize =	__constant_cpu_to_le16(IN_EP_MAX_PACKET_SIZE), // 16 bytes to be confirm! 
++	.bInterval =		4, /* 4 in hi speed as 2 exp (4 -1) = 8 uframe time,  8 uframe time is 8 * 125 us = 1ms */
+ };
+ 
+-/* Class-specific AS ISO OUT Endpoint Descriptor */
++/* Class-specific AS ISO OUT/IN Endpoint Descriptor */
++
+ static struct uac_iso_endpoint_descriptor as_iso_out_desc __initdata = {
+ 	.bLength =		UAC_ISO_ENDPOINT_DESC_SIZE,
+ 	.bDescriptorType =	USB_DT_CS_ENDPOINT,
+@@ -197,22 +322,46 @@ static struct uac_iso_endpoint_descriptor as_iso_out_desc __initdata = {
+ 	.wLockDelay =		__constant_cpu_to_le16(1),
+ };
+ 
++static struct uac_iso_endpoint_descriptor as_iso_in_desc __initdata = {
++	.bLength =		UAC_ISO_ENDPOINT_DESC_SIZE,
++	.bDescriptorType =	USB_DT_CS_ENDPOINT,
++	.bDescriptorSubtype =	UAC_EP_GENERAL,
++	.bmAttributes = 	0,
++	.bLockDelayUnits =	0,
++	.wLockDelay =		0,
++};
++
+ static struct usb_descriptor_header *f_audio_desc[] __initdata = {
+ 	(struct usb_descriptor_header *)&ac_interface_desc,
+ 	(struct usb_descriptor_header *)&ac_header_desc,
+ 
++	/* internal topology */
+ 	(struct usb_descriptor_header *)&input_terminal_desc,
+-	(struct usb_descriptor_header *)&output_terminal_desc,
++	(struct usb_descriptor_header *)&input_terminal_in_desc,
+ 	(struct usb_descriptor_header *)&feature_unit_desc,
++	(struct usb_descriptor_header *)&output_terminal_desc,
++	(struct usb_descriptor_header *)&output_terminal_in_desc,
+ 
++	/* audio stream out interface desc */
+ 	(struct usb_descriptor_header *)&as_interface_alt_0_desc,
+ 	(struct usb_descriptor_header *)&as_interface_alt_1_desc,
+-	(struct usb_descriptor_header *)&as_header_desc,
++	(struct usb_descriptor_header *)&as_header_desc,  // class interface desc
++
++	(struct usb_descriptor_header *)&as_type_i_desc,  // audio data format
+ 
+-	(struct usb_descriptor_header *)&as_type_i_desc,
++	(struct usb_descriptor_header *)&as_out_ep_desc,  // standard endpoint desc 
++	(struct usb_descriptor_header *)&as_iso_out_desc, // class    endpoint desc
++
++	/* audio stream in interface desc */
++	(struct usb_descriptor_header *)&as_interface_alt_in_0_desc,
++	(struct usb_descriptor_header *)&as_interface_alt_in_1_desc,
++	(struct usb_descriptor_header *)&as_header_in_desc, // class interface desc
++
++	(struct usb_descriptor_header *)&as_type_i_in_desc, // audio data format
++
++	(struct usb_descriptor_header *)&as_in_ep_desc,     // standard endpoint desc
++	(struct usb_descriptor_header *)&as_iso_in_desc,    // class endpoint desc
+ 
+-	(struct usb_descriptor_header *)&as_out_ep_desc,
+-	(struct usb_descriptor_header *)&as_iso_out_desc,
+ 	NULL,
+ };
+ 
+@@ -240,7 +389,7 @@ static struct usb_gadget_strings *audio_strings[] = {
+ };
+ 
+ /*
+- * This function is an ALSA sound card following USB Audio Class Spec 1.0.
++ * This function is an ALSA sound card/ sound capture following USB Audio Class Spec 1.0.
+  */
+ 
+ /*-------------------------------------------------------------------------*/
+@@ -250,6 +399,199 @@ struct f_audio_buf {
+ 	struct list_head list;
+ };
+ 
++#define AUDIO_READ_RINGBUF_LEN  (23 * OUT_EP_MAX_PACKET_SIZE)  /* 4416 bytes, max valid 22 * 192, about 22ms at 48KHZ */
++#define AUDIO_WRITE_RINGBUF_LEN (32 * IN_EP_MAX_PACKET_SIZE)   /* 1024 bytes about 32ms at 8KHZ  */
++
++
++struct f_audio_ringbuf {
++	u8 *buf;
++	int len;
++	int actual;
++	int wp;             /* next write index avaliable for write */
++	int rp;             /* next read  index avaliable for read  */
++	bool needwakeup;
++	int  wakeuplen; 
++	spinlock_t lock;
++	wait_queue_head_t wait;
++};
++
++static struct f_audio_ringbuf *f_audio_ringbuffer_alloc(int buf_size)
++{
++	struct f_audio_ringbuf *ringbuf;
++
++	ringbuf = kzalloc(sizeof *ringbuf, GFP_ATOMIC);
++	if (!ringbuf)
++		return ERR_PTR(-ENOMEM);
++
++	ringbuf->buf    = kzalloc(buf_size, GFP_ATOMIC);
++	if (!ringbuf->buf) {
++		kfree(ringbuf);
++		return ERR_PTR(-ENOMEM);
++	}
++
++	ringbuf->len          = buf_size;
++	ringbuf->needwakeup   = false;
++	ringbuf->wakeuplen    = 0;
++	ringbuf->actual       = 0;   /* explicit set actual to zero */
++
++	ringbuf->wp = ringbuf->rp  = 0;
++
++	spin_lock_init(&ringbuf->lock);
++	init_waitqueue_head(&ringbuf->wait);
++
++	return ringbuf;
++}
++
++static void f_audio_ringbuffer_free(struct f_audio_ringbuf *buf)
++{
++	kfree(buf->buf);
++	kfree(buf);
++}
++
++void f_audio_ringbuffer_clean(struct f_audio_ringbuf *ringbuf)
++{
++    ringbuf->rp = ringbuf->wp = 0;
++
++    //ringbuf->needwakeup   = false;
++    //ringbuf->wakeuplen    = 0;
++    ringbuf->actual       = 0;
++}
++
++/* buf can't be user space, because this function maybe called at interupt context */
++int f_audio_ringbuffer_read(struct f_audio_ringbuf *ringbuf, int alignLen, int len, void *buf)
++{
++    int    avaLen    = 0;  /* avaLen == ringbuf->actual ? */
++    int   copyLen    = 0;
++    int    oActual   = ringbuf->actual;
++
++    /* align with alignLen */
++    len -= len % alignLen;
++
++    if(ringbuf->wp >= ringbuf->rp)
++	/* if wp == rp  no data at all */
++    {
++	avaLen   = ringbuf->wp - ringbuf->rp;
++
++	copyLen  = avaLen < len ? avaLen : len;
++	copyLen -= copyLen % alignLen;
++
++	memcpy(buf, ringbuf->buf + ringbuf->rp, copyLen);
++
++	ringbuf->rp     += copyLen;
++	ringbuf->actual -= copyLen;
++    }
++    else
++    {
++	avaLen  = ringbuf->len - ringbuf->rp + ringbuf->wp;
++
++	copyLen  = avaLen < len ? avaLen : len;
++	copyLen -= copyLen % alignLen;
++
++	if(ringbuf->len - ringbuf->rp >= copyLen)
++	{
++	    memcpy(buf, ringbuf->buf + ringbuf->rp, copyLen);
++
++	    ringbuf->rp += copyLen;
++	    if(ringbuf->rp == ringbuf->len)
++		/* wrap */
++		ringbuf->rp = 0;
++
++	    ringbuf->actual -= copyLen;
++
++	}
++	else
++	{
++	    memcpy(buf, ringbuf->buf + ringbuf->rp, ringbuf->len - ringbuf->rp);
++	    memcpy(buf + ringbuf->len - ringbuf->rp, ringbuf->buf, copyLen - (ringbuf->len - ringbuf->rp));
++
++	    ringbuf->rp      = copyLen - (ringbuf->len - ringbuf->rp);
++	    ringbuf->actual -= copyLen;
++	}
++
++    }
++
++    /* it equal to copyLen ? */
++    return (oActual - ringbuf->actual);
++}
++
++/* buf can't be user space, because this function maybe called at interupt context */
++int f_audio_ringbuffer_write(struct f_audio_ringbuf *ringbuf, int alignLen, int len, void *buf)
++{
++    int    avaLen    = 0;
++    int   copyLen    = 0;
++    int    oActual   = ringbuf->actual;
++    int    ret       = 0;
++    
++    /* align with alignLen */
++    len -= len % alignLen;
++
++    if(ringbuf->wp >= ringbuf->rp)
++	/* if wp == rp  no data at all */
++    {
++	avaLen  = ringbuf->len - ringbuf->wp + ringbuf->rp; 
++
++	copyLen  = avaLen < len ? copyLen : len;
++	copyLen -= copyLen % alignLen;
++
++	if(ringbuf->len - ringbuf->wp >= copyLen)
++	    /* copy no wrap */
++	{
++	    memcpy(ringbuf->buf + ringbuf->wp, buf, copyLen);
++
++	    ringbuf->wp += copyLen;
++	    if(ringbuf->wp == ringbuf->len)
++		/* wrap ringbuf->len - ringbuf->wp == len */
++		ringbuf->wp = 0;
++	    ringbuf->actual += copyLen;
++	}
++	else
++	    /* copy wrap */
++	{
++	    memcpy(ringbuf->buf + ringbuf->wp, buf, ringbuf->len - ringbuf->wp);
++	    memcpy(ringbuf->buf, buf + ringbuf->len - ringbuf->wp, copyLen - (ringbuf->len - ringbuf->wp));
++
++	    ringbuf->wp      = copyLen - (ringbuf->len - ringbuf->wp);
++	    ringbuf->actual += copyLen;
++	}
++    }
++    else
++    {
++	avaLen  = ringbuf->rp - ringbuf->wp;
++
++	copyLen  = avaLen < len ? avaLen : len;
++	copyLen -= copyLen % alignLen;
++
++	memcpy(ringbuf->buf + ringbuf->wp, buf, copyLen);
++
++	ringbuf->wp      = ringbuf->wp + copyLen;
++	ringbuf->actual += copyLen;
++
++    }
++
++    /* it equal to copyLen ? */
++    ret = ringbuf->actual - oActual;
++
++    if(ringbuf->len - ringbuf->actual < alignLen)
++    {
++	ringbuf->rp     += (alignLen * (ringbuf->len /(alignLen * 3)));  /* if cache up read pointer, discard 1/3 ring buf */
++	ringbuf->rp     %= ringbuf->len;
++	ringbuf->actual -= (alignLen * (ringbuf->len /(alignLen * 3)));
++	if(ringbuf->actual <= 0)
++	{
++	    printk("Ringbuf actual less than or equal 0, it shoud not happen! Need debug it!! \n");
++	    printk("Ringbuf wp:%d, rp:%d, actual:%d \n", ringbuf->wp, ringbuf->rp, ringbuf->actual);
++	}
++
++	//printk("Ring buf full, discard the oldest 1/3 content, ring buf length is %d \n", ringbuf->len);
++    }
++
++    return (ret);
++}
++
++
++
++
++#ifdef PLAYBACK
+ static struct f_audio_buf *f_audio_buffer_alloc(int buf_size)
+ {
+ 	struct f_audio_buf *copy_buf;
+@@ -258,7 +600,8 @@ static struct f_audio_buf *f_audio_buffer_alloc(int buf_size)
+ 	if (!copy_buf)
+ 		return ERR_PTR(-ENOMEM);
+ 
+-	copy_buf->buf = kzalloc(buf_size, GFP_ATOMIC);
++	copy_buf->buf    = kzalloc(buf_size, GFP_ATOMIC);
++	copy_buf->actual = 0;   /* explicit set actual to zero */
+ 	if (!copy_buf->buf) {
+ 		kfree(copy_buf);
+ 		return ERR_PTR(-ENOMEM);
+@@ -272,26 +615,62 @@ static void f_audio_buffer_free(struct f_audio_buf *audio_buf)
+ 	kfree(audio_buf->buf);
+ 	kfree(audio_buf);
+ }
++#endif
++
+ /*-------------------------------------------------------------------------*/
+ 
+ struct f_audio {
+ 	struct gaudio			card;
+ 
+-	/* endpoints handle full and/or high speeds */
++	/* out endpoint handle full and/or high speeds */
+ 	struct usb_ep			*out_ep;
+ 	struct usb_endpoint_descriptor	*out_desc;
+ 
++	/* in endpoint handle full and/or high speeds */
++	struct usb_ep			*in_ep;
++	struct usb_endpoint_descriptor	*in_desc;
++
++	struct list_head                 out_queue;  /* out free req queue head */
++	struct list_head                 in_queue;   /* in  free req queue head */ 
++
+ 	spinlock_t			lock;
+-	struct f_audio_buf *copy_buf;
+-	struct work_struct playback_work;
+-	struct list_head play_queue;
++
++#ifdef PLAYBACK
++	struct f_audio_buf             *copy_buf;
++	struct work_struct              playback_work;
++	struct list_head                play_queue;
++#endif
++	struct f_audio_ringbuf         *read_buf;
++	struct f_audio_ringbuf         *write_buf;
++
+ 
+ 	/* Control Set command */
+ 	struct list_head cs;
+ 	u8 set_cmd;
+ 	struct usb_audio_control *set_con;
++
++
++	/* file system */
++
++
++	struct super_block            *sb;
++	struct dentry                 *dentry;
++
++	struct semaphore              readSem, writeSem;
++
++	bool                          out_enable;   /* flag for out interface enable/disable */
++	bool                          in_enable;    /* flag for in  interface enable/disable */
++
++
++#ifdef SHOW_RINGBUFLEN
++	/* check ringbuf len */
++	unsigned long                 outCheckStamp;
++	unsigned long                 inCheckStamp;
++#endif
+ };
+ 
++static struct f_audio *theAudio = NULL;
++
+ static inline struct f_audio *func_to_audio(struct usb_function *f)
+ {
+ 	return container_of(f, struct f_audio, card.func);
+@@ -299,6 +678,7 @@ static inline struct f_audio *func_to_audio(struct usb_function *f)
+ 
+ /*-------------------------------------------------------------------------*/
+ 
++#ifdef PLAYBACK
+ static void f_audio_playback_work(struct work_struct *data)
+ {
+ 	struct f_audio *audio = container_of(data, struct f_audio,
+@@ -320,17 +700,22 @@ static void f_audio_playback_work(struct work_struct *data)
+ 
+ 	return;
+ }
++#endif
+ 
+ static int f_audio_out_ep_complete(struct usb_ep *ep, struct usb_request *req)
+ {
+ 	struct f_audio *audio = req->context;
+ 	struct usb_composite_dev *cdev = audio->card.func.config->cdev;
++#ifdef PLAYBACK
+ 	struct f_audio_buf *copy_buf = audio->copy_buf;
++#endif
+ 	int err;
+ 
++#ifdef PLAYBACK
+ 	if (!copy_buf)
+ 		return -EINVAL;
+ 
++
+ 	/* Copy buffer is full, add it to the play_queue */
+ 	if (audio_buf_size - copy_buf->actual < req->actual) {
+ 		list_add_tail(&copy_buf->list, &audio->play_queue);
+@@ -342,35 +727,189 @@ static int f_audio_out_ep_complete(struct usb_ep *ep, struct usb_request *req)
+ 
+ 	memcpy(copy_buf->buf + copy_buf->actual, req->buf, req->actual);
+ 	copy_buf->actual += req->actual;
+-	audio->copy_buf = copy_buf;
++	audio->copy_buf   = copy_buf;
++#endif
++
++	if(req->actual % OUT_EP_ALIGN == 0)
++	{
++	    int   writeLeft = req->actual;
++	    char *tmpBuf    = req->buf;
++	    int   writeLen  = 0;
++
++	    while(writeLeft > 0)
++	    {
++		spin_lock_irq(&audio->read_buf->lock);
++		/* copy buf to read buf, if read buf full ?, discard ! */
++		writeLen   = f_audio_ringbuffer_write(audio->read_buf, OUT_EP_ALIGN, writeLeft, tmpBuf);
++		writeLeft -= writeLen;
++		tmpBuf    += writeLen;
++		spin_unlock_irq(&audio->read_buf->lock);
++	    }
++
++	    if(audio->read_buf->needwakeup && audio->read_buf->actual > audio->read_buf->wakeuplen)
++		wake_up(&audio->read_buf->wait);
++	}
++	else
++	    ERROR(cdev, "Req acutal:%d is not align with OUT_EP_ALIGN:%d, discard this REQ \n", req->actual, OUT_EP_ALIGN);
++
+ 
+ 	err = usb_ep_queue(ep, req, GFP_ATOMIC);
+ 	if (err)
+-		ERROR(cdev, "%s queue req: %d\n", ep->name, err);
++	    ERROR(cdev, "%s queue req: %d\n", ep->name, err);
++
++#ifdef SHOW_RINGBUFLEN
++	if(jiffies - audio->outCheckStamp >= 5 * HZ)
++	{
++	    int readBufLen = 0;
++
++	    spin_lock_irq(&audio->read_buf->lock);
++	    readBufLen = audio->read_buf->actual;
++	    spin_unlock_irq(&audio->read_buf->lock);
++	    INFO(cdev, "Output ringbuf len is %d \n",  readBufLen);
++	    audio->outCheckStamp = jiffies;
++	}
++#endif
+ 
+ 	return 0;
+ 
+ }
+ 
++/* put audio->in_queue req to in pipe */
++static void f_audio_drain_in_queue(struct f_audio *audio)
++{
++    struct f_audio_ringbuf *ringbuf    = audio->write_buf;
++    struct  usb_composite_dev *cdev    = audio->card.func.config->cdev;
++    struct usb_request *req = NULL;
++    int    oneReadLen, err;
++
++    spin_lock_irq(&audio->lock);
++    while(!list_empty(&(audio->in_queue)))
++    {
++
++        oneReadLen = -1; 
++	err        = 0;
++
++	req = list_first_entry(&(audio->in_queue), struct usb_request, list);
++	list_del(&req->list);
++	spin_unlock_irq(&audio->lock);
++
++
++	spin_lock_irq(&ringbuf->lock);
++	if(ringbuf->actual >= req->length)
++	    oneReadLen = f_audio_ringbuffer_read(ringbuf, IN_EP_ALIGN, req->length, req->buf);
++	spin_unlock_irq(&ringbuf->lock);
++
++	if(oneReadLen == req->length)
++	    err = usb_ep_queue(audio->in_ep, req, GFP_ATOMIC);
++
++	if(oneReadLen != req->length || err )
++	{
++	    if(err)
++		/* need recover ringbuf ? */
++		ERROR(cdev, "%s queue req: %d\n", audio->in_ep->name, err);
++	    else
++		if(oneReadLen != -1)
++		    ERROR(cdev, "OneReadLen:%d not equal to req->length or -1!, should not happen! \n", oneReadLen);
++
++	    spin_lock_irq(&audio->lock);
++	    list_add_tail(&req->list, &audio->in_queue);
++	    break;
++	}
++	spin_lock_irq(&audio->lock);
++    } /* read ring buf and queue to audio->in_queue */
++    spin_unlock_irq(&audio->lock);
++
++    return;
++}
++
++static int f_audio_in_ep_complete(struct usb_ep *ep, struct usb_request *req)
++{
++    struct f_audio             *audio = req->context;
++
++#ifdef SHOW_RINGBUFLEN
++    struct usb_composite_dev *cdev    = audio->card.func.config->cdev;
++#endif
++
++#if 0
++    struct f_audio_ringbuf   *ringbuf = audio->write_buf;
++#endif
++
++    spin_lock_irq(&audio->lock);
++    list_add_tail(&(req->list), &(audio->in_queue));
++    spin_unlock_irq(&audio->lock);
++
++    f_audio_drain_in_queue(audio);
++
++#if 0
++    spin_lock_irq(&ringbuf->lock);
++    if(ringbuf->needwakeup && ringbuf->len - ringbuf->actual  > ringbuf->wakeuplen)
++	wake_up(&ringbuf->wait);
++    spin_unlock_irq(&ringbuf->lock);
++#endif
++
++#ifdef SHOW_RINGBUFLEN
++    if(jiffies - audio->inCheckStamp >= 5 * HZ)
++    {
++	int writeBufLen = 0;
++
++	spin_lock_irq(&audio->write_buf->lock);
++	writeBufLen = audio->write_buf->actual;
++	spin_unlock_irq(&audio->write_buf->lock);
++	INFO(cdev, "In ringbuf len is %d \n",  writeBufLen);
++	audio->inCheckStamp = jiffies;
++    }
++#endif
++
++    return 0;
++}
++
++
++
+ static void f_audio_complete(struct usb_ep *ep, struct usb_request *req)
+ {
+ 	struct f_audio *audio = req->context;
+ 	int status = req->status;
+ 	u32 data = 0;
+ 	struct usb_ep *out_ep = audio->out_ep;
++	struct usb_ep *in_ep  = audio->in_ep;
+ 
+ 	switch (status) {
+ 
+ 	case 0:				/* normal completion? */
+ 		if (ep == out_ep)
++		{
+ 			f_audio_out_ep_complete(ep, req);
+-		else if (audio->set_con) {
++		};
++
++		if (ep == in_ep)
++		{
++			f_audio_in_ep_complete(ep, req);
++		};
++
++		if(ep != out_ep && ep != in_ep && audio->set_con) 
++		{
++		        
+ 			memcpy(&data, req->buf, req->length);
+ 			audio->set_con->set(audio->set_con, audio->set_cmd,
+ 					le16_to_cpu(data));
+ 			audio->set_con = NULL;
+ 		}
+ 		break;
++	case -ESHUTDOWN:        	/* error shut down?  */
++		if (ep == out_ep)
++		{
++		    spin_lock_irq(&audio->lock);
++		    list_add_tail(&(req->list), &(audio->out_queue));
++		    spin_unlock_irq(&audio->lock);
++		}
++
++		if (ep == in_ep)
++		{
++		    spin_lock_irq(&audio->lock);
++		    list_add_tail(&(req->list), &(audio->in_queue));
++		    spin_unlock_irq(&audio->lock);
++		}
++		break;
+ 	default:
+ 		break;
+ 	}
+@@ -390,8 +929,8 @@ static int audio_set_intf_req(struct usb_function *f,
+ 	struct usb_audio_control_selector *cs;
+ 	struct usb_audio_control *con;
+ 
+-	DBG(cdev, "bRequest 0x%x, w_value 0x%04x, len %d, entity %d\n",
+-			ctrl->bRequest, w_value, len, id);
++	DBG(cdev, "Set inft req bRequest 0x%x, w_value 0x%04x, len %d, entity %d, con_sel %d \n",
++			ctrl->bRequest, w_value, len, id, con_sel);
+ 
+ 	list_for_each_entry(cs, &audio->cs, list) {
+ 		if (cs->id == id) {
+@@ -427,7 +966,7 @@ static int audio_get_intf_req(struct usb_function *f,
+ 	struct usb_audio_control_selector *cs;
+ 	struct usb_audio_control *con;
+ 
+-	DBG(cdev, "bRequest 0x%x, w_value 0x%04x, len %d, entity %d\n",
++	DBG(cdev, "Get intf req bRequest 0x%x, w_value 0x%04x, len %d, entity %d\n",
+ 			ctrl->bRequest, w_value, len, id);
+ 
+ 	list_for_each_entry(cs, &audio->cs, list) {
+@@ -458,12 +997,12 @@ static int audio_set_endpoint_req(struct usb_function *f,
+ 	u16			len = le16_to_cpu(ctrl->wLength);
+ 	u16			w_value = le16_to_cpu(ctrl->wValue);
+ 
+-	DBG(cdev, "bRequest 0x%x, w_value 0x%04x, len %d, endpoint %d\n",
++	DBG(cdev, "Set endpint req bRequest 0x%x, w_value 0x%04x, len %d, endpoint %d\n",
+ 			ctrl->bRequest, w_value, len, ep);
+ 
+ 	switch (ctrl->bRequest) {
+ 	case UAC_SET_CUR:
+-		value = 0;
++		value = len;
+ 		break;
+ 
+ 	case UAC_SET_MIN:
+@@ -494,7 +1033,7 @@ static int audio_get_endpoint_req(struct usb_function *f,
+ 	u16 len = le16_to_cpu(ctrl->wLength);
+ 	u16 w_value = le16_to_cpu(ctrl->wValue);
+ 
+-	DBG(cdev, "bRequest 0x%x, w_value 0x%04x, len %d, endpoint %d\n",
++	DBG(cdev, "Get endpoint req bRequest 0x%x, w_value 0x%04x, len %d, endpoint %d\n",
+ 			ctrl->bRequest, w_value, len, ep);
+ 
+ 	switch (ctrl->bRequest) {
+@@ -502,7 +1041,7 @@ static int audio_get_endpoint_req(struct usb_function *f,
+ 	case UAC_GET_MIN:
+ 	case UAC_GET_MAX:
+ 	case UAC_GET_RES:
+-		value = 3;
++		value = len;
+ 		break;
+ 	case UAC_GET_MEM:
+ 		break;
+@@ -570,55 +1109,105 @@ static int f_audio_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
+ 	struct f_audio		*audio = func_to_audio(f);
+ 	struct usb_composite_dev *cdev = f->config->cdev;
+ 	struct usb_ep *out_ep = audio->out_ep;
++	struct usb_ep *in_ep  = audio->in_ep;
+ 	struct usb_request *req;
+-	int i = 0, err = 0;
++	int err = 0;
+ 
+-	DBG(cdev, "intf %d, alt %d\n", intf, alt);
++	INFO(cdev, "intf %d, alt %d\n", intf, alt);
+ 
+ 	if (intf == 1) {
+-		if (alt == 1) {
+-			usb_ep_enable(out_ep, audio->out_desc);
+-			out_ep->driver_data = audio;
+-			audio->copy_buf = f_audio_buffer_alloc(audio_buf_size);
+-			if (IS_ERR(audio->copy_buf))
+-				return -ENOMEM;
+-
+-			/*
+-			 * allocate a bunch of read buffers
+-			 * and queue them all at once.
+-			 */
+-			for (i = 0; i < req_count && err == 0; i++) {
+-				req = usb_ep_alloc_request(out_ep, GFP_ATOMIC);
+-				if (req) {
+-					req->buf = kzalloc(req_buf_size,
+-							GFP_ATOMIC);
+-					if (req->buf) {
+-						req->length = req_buf_size;
+-						req->context = audio;
+-						req->complete =
+-							f_audio_complete;
+-						err = usb_ep_queue(out_ep,
+-							req, GFP_ATOMIC);
+-						if (err)
+-							ERROR(cdev,
+-							"%s queue req: %d\n",
+-							out_ep->name, err);
+-					} else
+-						err = -ENOMEM;
+-				} else
+-					err = -ENOMEM;
+-			}
++	    if (alt == 1 ) {
++		usb_ep_enable(out_ep, audio->out_desc);
++		out_ep->driver_data = audio;
++
++#ifdef PLAYBACK
++		audio->copy_buf = f_audio_buffer_alloc(audio_buf_size);
++		if (IS_ERR(audio->copy_buf))
++		    return -ENOMEM;
++#endif
++		/*
++		 * queue them all at once.
++		 */
++		spin_lock_irq(&audio->lock);
++		while(!list_empty(&audio->out_queue))
++		{
++		    req = list_first_entry(&audio->out_queue, struct usb_request, list);
++		    spin_unlock_irq(&audio->lock);
++
++		    err = usb_ep_queue(out_ep, req, GFP_ATOMIC);
++		    if (err) 
++		    {
++			ERROR(cdev, "%s queue req: %d\n", out_ep->name, err);
++			spin_lock_irq(&audio->lock);
++			break;
++		    }
+ 
+-		} else {
+-			struct f_audio_buf *copy_buf = audio->copy_buf;
+-			if (copy_buf) {
+-				list_add_tail(&copy_buf->list,
+-						&audio->play_queue);
+-				schedule_work(&audio->playback_work);
+-			}
++		    spin_lock_irq(&audio->lock);
++		    list_del(&req->list);
++		}
++		spin_unlock_irq(&audio->lock);
++
++		spin_lock_irq(&audio->read_buf->lock);
++		f_audio_ringbuffer_clean(audio->read_buf);
++		spin_unlock_irq(&audio->read_buf->lock);
++
++		audio->out_enable = true;
++
++	    } else {
++#ifdef PLAYBACK
++		struct f_audio_buf *copy_buf = audio->copy_buf;
++		if (copy_buf) {
++		    list_add_tail(&copy_buf->list,
++			    &audio->play_queue);
++		    schedule_work(&audio->playback_work);
+ 		}
++
++#endif
++		usb_ep_disable(out_ep);
++		audio->out_enable = false;
++		audio->read_buf->wakeuplen = 0;
++		/* has race condititon with read wait */
++		wake_up(&audio->read_buf->wait);
++	    }
+ 	}
+ 
++	if (intf == 2) {
++	    if (alt == 1) {
++		usb_ep_enable(in_ep, audio->in_desc);
++		in_ep->driver_data = audio;
++
++		spin_lock_irq(&audio->lock);
++		while(!list_empty(&audio->in_queue))
++		{
++		    req = list_first_entry(&audio->in_queue, struct usb_request, list);
++		    spin_unlock_irq(&audio->lock);
++
++		    err = usb_ep_queue(in_ep, req, GFP_ATOMIC);
++		    if (err) 
++		    {
++			ERROR(cdev, "%s queue req: %d\n", in_ep->name, err);
++			spin_lock_irq(&audio->lock);
++			break;
++		    }
++		    spin_lock_irq(&audio->lock);
++		    list_del(&req->list);
++		}
++		spin_unlock_irq(&audio->lock);
++
++		spin_lock_irq(&audio->write_buf->lock);
++		f_audio_ringbuffer_clean(audio->write_buf);
++		spin_unlock_irq(&audio->write_buf->lock);
++		audio->in_enable = true;
++		f_audio_drain_in_queue(audio);
++	    } /* alt set 1 */
++	    else
++	    {
++		usb_ep_disable(in_ep);
++		audio->in_enable = false;
++	    }
++	} /* interface 2 */
++
++	DBG(cdev, "err is %d \n", err);
+ 	return err;
+ }
+ 
+@@ -631,19 +1220,41 @@ static void f_audio_disable(struct usb_function *f)
+ 
+ static void f_audio_build_desc(struct f_audio *audio)
+ {
+-	struct gaudio *card = &audio->card;
+ 	u8 *sam_freq;
+ 	int rate;
+ 
++#ifdef PLAYBACK
++	struct gaudio *card = &audio->card;
++
+ 	/* Set channel numbers */
+ 	input_terminal_desc.bNrChannels = u_audio_get_playback_channels(card);
+ 	as_type_i_desc.bNrChannels = u_audio_get_playback_channels(card);
++	as_type_i_in_desc.bNrChannels = u_audio_get_playback_channels(card);
+ 
+ 	/* Set sample rates */
+ 	rate = u_audio_get_playback_rate(card);
++
++	sam_freq = as_type_i_desc.tSamFreq[0];
++	memcpy(sam_freq, &rate, 3);
++
++	sam_freq = as_type_i_in_desc.tSamFreq[0];
++	memcpy(sam_freq, &rate, 3);
++#else
++	input_terminal_desc.bNrChannels = out_channel;
++	as_type_i_desc.bNrChannels = out_channel;
++	as_type_i_in_desc.bNrChannels = in_channel;
++
++	/* For OUT  */
++	rate = out_sample_rate;
+ 	sam_freq = as_type_i_desc.tSamFreq[0];
+ 	memcpy(sam_freq, &rate, 3);
+ 
++	/* For IN  */
++	rate = in_sample_rate;
++	sam_freq = as_type_i_in_desc.tSamFreq[0];
++	memcpy(sam_freq, &rate, 3);
++#endif
++
+ 	/* Todo: Set Sample bits and other parameters */
+ 
+ 	return;
+@@ -657,6 +1268,8 @@ f_audio_bind(struct usb_configuration *c, struct usb_function *f)
+ 	struct f_audio		*audio = func_to_audio(f);
+ 	int			status;
+ 	struct usb_ep		*ep;
++	struct usb_request      *req;
++	int                       i;
+ 
+ 	f_audio_build_desc(audio);
+ 
+@@ -672,15 +1285,30 @@ f_audio_bind(struct usb_configuration *c, struct usb_function *f)
+ 	as_interface_alt_0_desc.bInterfaceNumber = status;
+ 	as_interface_alt_1_desc.bInterfaceNumber = status;
+ 
++	status = usb_interface_id(c, f);
++	if (status < 0)
++		goto fail;
++	as_interface_alt_in_0_desc.bInterfaceNumber = status;
++	as_interface_alt_in_1_desc.bInterfaceNumber = status;
++
+ 	status = -ENODEV;
+ 
+-	/* allocate instance-specific endpoints */
++	/* allocate instance-specific out endpoints */
+ 	ep = usb_ep_autoconfig(cdev->gadget, &as_out_ep_desc);
+ 	if (!ep)
+ 		goto fail;
+ 	audio->out_ep = ep;
+ 	ep->driver_data = cdev;	/* claim */
+ 
++
++	/* allocate instance-specific in endpoints */
++	ep = usb_ep_autoconfig(cdev->gadget, &as_in_ep_desc);
++	if (!ep)
++		goto fail;
++	audio->in_ep = ep;
++	ep->driver_data = cdev;	/* claim */
++
++
+ 	status = -ENOMEM;
+ 
+ 	/* supcard all relevant hardware speeds... we expect that when
+@@ -689,26 +1317,120 @@ f_audio_bind(struct usb_configuration *c, struct usb_function *f)
+ 	 */
+ 
+ 	/* copy descriptors, and track endpoint copies */
++	/* desc only configed for high speed!, so if full speed, may not work */
+ 	if (gadget_is_dualspeed(c->cdev->gadget)) {
+ 		c->highspeed = true;
+ 		f->hs_descriptors = usb_copy_descriptors(f_audio_desc);
+ 	} else
+ 		f->descriptors = usb_copy_descriptors(f_audio_desc);
+ 
++
++	for (i = 0; i < out_req_count; i++) 
++	    /* how to release other req, if alloc one req failed ? */
++	{
++	    req = usb_ep_alloc_request(audio->out_ep, GFP_ATOMIC);
++	    if (req) 
++	    {
++		req->buf = kzalloc(out_req_buf_size, GFP_ATOMIC);
++		if (req->buf) 
++		{
++		    req->length   = out_req_buf_size;
++		    req->context  = audio;
++		    req->complete = f_audio_complete;
++		} 
++		else
++		{
++		    status = -ENOMEM;
++		    usb_ep_free_request(audio->out_ep, req);
++		    break;
++		}
++	    } 
++	    else
++	    {
++		status = -ENOMEM;
++		break;
++	    }
++
++	    list_add_tail(&req->list, &audio->out_queue);
++	}
++	audio->out_enable = false;
++
++	for (i = 0; i < in_req_count; i++) 
++	    /* how to release other req, if alloc one req failed ? */
++	{
++	    req = usb_ep_alloc_request(audio->in_ep, GFP_ATOMIC);
++	    if (req) 
++	    {
++		req->buf = kzalloc(in_req_buf_size, GFP_ATOMIC);
++		if (req->buf) 
++		{
++		    req->length   = in_req_buf_size;
++		    req->context  = audio;
++		    req->complete = f_audio_complete;
++		} 
++		else
++		{
++		    status = -ENOMEM;
++		    usb_ep_free_request(audio->in_ep, req);
++		    break;
++		}
++	    } 
++	    else
++	    {
++		status = -ENOMEM;
++		break;
++	    }
++
++	    list_add_tail(&req->list, &audio->in_queue);
++	}
++	audio->in_enable = false;
++
+ 	return 0;
+ 
+ fail:
++	INFO(cdev, "allocate endpoint desc failed \n");
+ 
+ 	return status;
+ }
+ 
++static struct file_system_type gadgetaudiofs_type;
++
+ static void
+ f_audio_unbind(struct usb_configuration *c, struct usb_function *f)
+ {
+ 	struct f_audio		*audio = func_to_audio(f);
++	struct list_head        *pos;
++	struct usb_request      *req;
+ 
+ 	usb_free_descriptors(f->descriptors);
++	usb_free_descriptors(f->hs_descriptors);
++
++
++	f_audio_ringbuffer_free(audio->read_buf);
++	f_audio_ringbuffer_free(audio->write_buf);
++
++	usb_ep_disable(audio->out_ep);
++	usb_ep_disable(audio->in_ep);
++
++	list_for_each(pos, &audio->out_queue)
++	{
++		req = list_entry(pos, struct usb_request, list);
++		if(req->buf)
++		    kfree(req->buf);
++		usb_ep_free_request(audio->out_ep, req);
++	}
++
++	list_for_each(pos, &audio->in_queue)
++	{
++		req = list_entry(pos, struct usb_request, list);
++		if(req->buf)
++		    kfree(req->buf);
++		usb_ep_free_request(audio->in_ep, req);
++	}
++
+ 	kfree(audio);
++
++	unregister_filesystem (&gadgetaudiofs_type);
+ }
+ 
+ /*-------------------------------------------------------------------------*/
+@@ -763,13 +1485,24 @@ int __init audio_bind_config(struct usb_configuration *c)
+ 	audio->card.func.name = "g_audio";
+ 	audio->card.gadget = c->cdev->gadget;
+ 
++#ifdef PLAYBACK
+ 	INIT_LIST_HEAD(&audio->play_queue);
++#endif
++
++	INIT_LIST_HEAD(&audio->in_queue);
++	INIT_LIST_HEAD(&audio->out_queue);
++	init_MUTEX(&audio->readSem);
++	init_MUTEX(&audio->writeSem);
++
+ 	spin_lock_init(&audio->lock);
+ 
++#ifdef PLAYBACK
+ 	/* set up ASLA audio devices */
+ 	status = gaudio_setup(&audio->card);
++
+ 	if (status < 0)
+ 		goto setup_fail;
++#endif
+ 
+ 	audio->card.func.strings = audio_strings;
+ 	audio->card.func.bind = f_audio_bind;
+@@ -778,23 +1511,462 @@ int __init audio_bind_config(struct usb_configuration *c)
+ 	audio->card.func.setup = f_audio_setup;
+ 	audio->card.func.disable = f_audio_disable;
+ 	audio->out_desc = &as_out_ep_desc;
++	audio->in_desc  = &as_in_ep_desc;
+ 
+ 	control_selector_init(audio);
+ 
++#ifdef PLAYBACK
+ 	INIT_WORK(&audio->playback_work, f_audio_playback_work);
++#endif
+ 
+ 	status = usb_add_function(c, &audio->card.func);
+ 	if (status)
++#ifdef PLAYBACK
+ 		goto add_fail;
++#else
++		goto setup_fail;
++#endif
++
++
++	status = register_filesystem (&gadgetaudiofs_type);
++	if (status == 0)
++	    INFO(c->cdev,"Register gadgetaudiofs successfully \n");
++	else
++	    INFO(c->cdev,"Register gadgetaudiofs failed \n");
+ 
+-	INFO(c->cdev, "audio_buf_size %d, req_buf_size %d, req_count %d\n",
+-		audio_buf_size, req_buf_size, req_count);
++#ifdef PLAYBACK
++	INFO(c->cdev, "playback audio_buf_size %d \n", audio_buf_size);
++#endif
++
++	INFO(c->cdev, "Out sample rate:%d, channel:%d \n", out_sample_rate, out_channel);
++	INFO(c->cdev, "Out_req_buf_size %d, out_req_count %d\n", out_req_buf_size, out_req_count);
++
++	INFO(c->cdev, "In sample rate:%d, channel:%d \n", in_sample_rate, in_channel);
++	INFO(c->cdev, "In_req_buf_size %d, in_req_count %d\n", in_req_buf_size, in_req_count);
++
++	/* Bad ideal for save audio as global static variable */
++	theAudio = audio;
++
++
++	audio->read_buf  = f_audio_ringbuffer_alloc(AUDIO_READ_RINGBUF_LEN);
++	audio->write_buf = f_audio_ringbuffer_alloc(AUDIO_WRITE_RINGBUF_LEN);
++
++#ifdef SHOW_RINGBUFLEN
++	audio->outCheckStamp = audio->inCheckStamp = 0;
++#endif
++	/* need action to handle read_buf or write_buf alloc failed! */
++	/* to be done ! */
+ 
+ 	return status;
+ 
++#ifdef PLAYBACK
+ add_fail:
+ 	gaudio_cleanup();
++#endif
+ setup_fail:
+ 	kfree(audio);
+ 	return status;
+ }
++
++static unsigned default_uid;
++static unsigned default_gid;
++static unsigned default_perm = S_IRUSR | S_IWUSR;
++
++module_param (default_uid, uint, 0644);
++module_param (default_gid, uint, 0644);
++module_param (default_perm, uint, 0644);
++
++static int
++audiofsopen (struct inode *inode, struct file *fd)
++{
++    struct f_audio      *audio     = inode->i_private;
++    //struct usb_composite_dev *cdev = audio->card.func.config->cdev;
++
++    fd->private_data = audio;
++
++    return 0;
++}
++
++static int
++audiofsrelease (struct inode *inode, struct file *fd)
++{
++    //struct f_audio      *audio     = fd->private_data;
++    //struct usb_composite_dev *cdev = audio->card.func.config->cdev;
++
++    return 0;
++}
++
++
++static ssize_t
++audiofsread (struct file *fd, char __user *buf, size_t len, loff_t *ptr)
++{
++    struct  f_audio           *audio   = fd->private_data;
++    struct  usb_composite_dev *cdev    = audio->card.func.config->cdev;
++    struct  f_audio_ringbuf *ringbuf   = audio->read_buf;
++    ssize_t oneReadLen, readTotalLen, leftLen;
++
++    int   value         = 0;
++    char *copyBuf       = NULL;
++    int   oneReadMaxLen = 0;
++
++    /* align 4 is based on 16bit and 2 channel! */
++    if( (len % OUT_EP_ALIGN) != 0 )
++    {
++	INFO(cdev, "Read length not align with %d! \n", OUT_EP_ALIGN);
++	return -EFAULT;   /* Bad address */
++    }
++
++    /* malloc copy buf */
++    /* ring buf max avaliable for read is AUDIO_RINGBUF_LEN ? */ 
++    copyBuf = kzalloc(AUDIO_READ_RINGBUF_LEN, GFP_KERNEL);
++    if(copyBuf == NULL)
++	return -ENOMEM;
++
++    down_interruptible(&audio->readSem);
++
++    leftLen      = len;
++    readTotalLen = 0;
++    oneReadLen   = 0;
++
++    while(leftLen > 0)
++    {
++	oneReadMaxLen = leftLen > AUDIO_READ_RINGBUF_LEN ? AUDIO_READ_RINGBUF_LEN : leftLen;
++
++	spin_lock_irq(&ringbuf->lock);
++	oneReadLen    = f_audio_ringbuffer_read(ringbuf, OUT_EP_ALIGN, oneReadMaxLen, copyBuf);
++	spin_unlock_irq(&ringbuf->lock);
++
++	
++	readTotalLen += oneReadLen;
++	leftLen      -= oneReadLen;
++	if(copy_to_user(buf, copyBuf, oneReadLen))
++	{
++	    INFO(cdev, "copy to user failed \n");
++	    value = -EFAULT;
++	    goto  freeandgo;
++	}
++
++	buf += oneReadLen;
++
++	if(audio->out_enable == false && readTotalLen != 0)
++	    /* if pipe be disabled and some data be read, return */
++	    break;
++
++	if(leftLen > 0)
++	{
++	    if(ringbuf->actual > leftLen || ringbuf->actual >= (AUDIO_READ_RINGBUF_LEN / 2))
++		/* read ringbuf again, otherwise sleep */
++		continue;
++
++	    /* prepare for sleep */
++	    ringbuf->needwakeup = true;
++	    ringbuf->wakeuplen  = leftLen >= (AUDIO_READ_RINGBUF_LEN / 2) ? (AUDIO_READ_RINGBUF_LEN / 2) : leftLen;
++
++	    /* sleep forever ? sure some body wake it up ? */
++	    wait_event_interruptible(ringbuf->wait, ringbuf->actual >= ringbuf->wakeuplen);
++	    ringbuf->needwakeup = false;
++	}
++    }
++
++    *ptr += readTotalLen;
++    value = readTotalLen;
++freeandgo:
++    if(copyBuf)
++	kfree(copyBuf);
++
++    up(&audio->readSem);
++
++    return value;
++}
++
++static ssize_t
++audiofswrite (struct file *fd, const char __user *buf, size_t len, loff_t *ptr)
++{
++    struct  f_audio           *audio   = fd->private_data;
++    struct  usb_composite_dev *cdev    = audio->card.func.config->cdev;
++    struct  f_audio_ringbuf *ringbuf   = audio->write_buf;
++    ssize_t oneWriteLen, writeTotalLen, leftLen;
++
++    int     value         = 0;
++    char  *copyBuf        = NULL;
++    int    oneWriteMaxLen = 0;
++
++
++    if( (len % IN_EP_ALIGN) != 0 )
++    {
++	INFO(cdev, "Write length not align with IN_EP_ALIGN:%d! \n", IN_EP_ALIGN);
++	return -EFAULT;
++    }
++
++    /* malloc copy buf */
++    /* ring buf max avaliable for write is alos AUDIO_WRITE_RINGBUF_LEN  */ 
++    copyBuf = kzalloc(AUDIO_WRITE_RINGBUF_LEN, GFP_KERNEL);
++    if(copyBuf == NULL)
++	return -ENOMEM;
++
++    down_interruptible(&audio->writeSem);
++
++    leftLen       = len;
++    writeTotalLen = 0;
++    oneWriteLen   = 0;
++
++    while(leftLen > 0)
++    {
++	spin_lock_irq(&ringbuf->lock);
++	oneWriteMaxLen = ringbuf->len - ringbuf->actual;
++	oneWriteMaxLen = oneWriteMaxLen > leftLen ? leftLen : oneWriteMaxLen;
++	spin_unlock_irq(&ringbuf->lock);
++	if(copy_from_user(copyBuf, buf, oneWriteMaxLen)) 
++	{
++	    INFO(cdev, "Copy from user failed \n");
++	    value = -EFAULT;
++	    goto  freeandgo;
++	}
++
++	spin_lock_irq(&ringbuf->lock);
++	oneWriteLen    = f_audio_ringbuffer_write(ringbuf, IN_EP_ALIGN, oneWriteMaxLen, copyBuf);
++	spin_unlock_irq(&ringbuf->lock);
++
++
++	writeTotalLen += oneWriteLen;
++	leftLen       -= oneWriteLen;
++	buf           += oneWriteLen;
++
++
++#if 0
++	if(leftLen > 0)
++	{
++	    if(ringbuf->len - ringbuf->actual  - 1 > leftLen || ringbuf->len - ringbuf->actual -1 >= (AUDIO_WRITE_RINGBUF_LEN / 2))
++		/* write ringbuf again, otherwise sleep */
++		continue;
++
++	    /* prepare for sleep */
++	    ringbuf->needwakeup = true;
++	    ringbuf->wakeuplen  = leftLen >= (AUDIO_WRITE_RINGBUF_LEN / 2) ? (AUDIO_WRITE_RINGBUF_LEN / 2) : leftLen;
++
++	    /* 5000ms depend on audio bit rates */
++	    if(!wait_event_interruptible_timeout(ringbuf->wait, ringbuf->len - ringbuf->actual  - 1 > ringbuf->wakeuplen, msecs_to_jiffies(5000)))
++	    {
++		INFO(cdev, "Timeout for write \n");
++		printk("ringbuf->actual is %d, ringbuf->wakeuplen is %d \n", ringbuf->actual, ringbuf->wakeuplen);
++		printk("ringbuf->wp is %d, ringbuf->rp is %d \n", ringbuf->wp, ringbuf->rp);
++		ringbuf->needwakeup = false;
++		break;
++	    }
++	    ringbuf->needwakeup = false;
++	}
++#endif
++
++    } /* leftlen > 0 */
++
++
++    *ptr += writeTotalLen;
++    value = writeTotalLen;
++
++    if(audio->in_enable == true)
++	f_audio_drain_in_queue(audio);
++
++freeandgo:
++    if(copyBuf)
++	kfree(copyBuf);
++
++    up(&audio->writeSem);
++
++    return value;
++}
++
++static long audiofsioctl(struct file *fd, unsigned code, unsigned long value)
++{
++    struct  f_audio           *audio        = fd->private_data;
++    struct  usb_composite_dev *cdev         = audio->card.func.config->cdev;
++    long    retValue = 0;
++
++
++    switch(code)
++    {
++        case USBAUDIO_BUFFER_STATUS_GET:
++            {
++                struct  f_audio_ringbuf *writeRingbuf   = audio->write_buf;
++                struct  f_audio_ringbuf *readRingbuf    = audio->read_buf;
++                char __user *buf                        = (char __user *)(value);
++                struct  usbaudio_buffer_status bufferStatus;
++
++                spin_lock_irq(&readRingbuf->lock);
++                bufferStatus.playbackBufferTotalLen   = readRingbuf->len;
++                bufferStatus.playbackBufferCurrentLen = readRingbuf->actual;
++                spin_unlock_irq(&readRingbuf->lock);
++
++                spin_lock_irq(&writeRingbuf->lock);
++                bufferStatus.microphoneBufferTotalLen   = writeRingbuf->len;
++                bufferStatus.microphoneBufferCurrentLen = writeRingbuf->actual;
++                spin_unlock_irq(&writeRingbuf->lock);
++
++                copy_to_user(buf, &bufferStatus, sizeof bufferStatus);
++                break;
++            }
++        case USBAUDIO_SAIF_CLOCK_CONTROL:
++            {
++                __u32 __user * pSaifUserCurrentClk   = &((struct usbaudio_saif_clock_control __user *)(value))->saifCurrentClock;
++                __u32 __user * pSaifUserNextClk      = &((struct usbaudio_saif_clock_control __user *)(value))->saifNextClock;
++                __u32 saifKernelCurrentClk = -1, saifKernelNextClk = -1;
++                
++                struct clk *pSaif0Clk = NULL;
++                pSaif0Clk = clk_get(NULL, "saif.0");
++
++                if(pSaif0Clk == NULL)
++                {
++                    ERROR(cdev, "Can't get clock saif.0! \n");
++                    retValue = -ENOTTY;
++                }
++                else
++                {
++
++                    copy_from_user(&saifKernelNextClk, pSaifUserNextClk, sizeof saifKernelNextClk);
++
++                    if(saifKernelNextClk != -1)
++                    {
++                        /* for 512 see sound/soc/mxs/mxs-devb.c::mxs_evk_audio_hw_params */
++                        clk_set_rate(pSaif0Clk, saifKernelNextClk * 512 );
++
++                    }
++
++                    /* for 512 see sound/soc/mxs/mxs-devb.c::mxs_evk_audio_hw_params */
++                    saifKernelCurrentClk = clk_get_rate(pSaif0Clk) / 512;
++                    copy_to_user(pSaifUserCurrentClk, &saifKernelCurrentClk, sizeof *pSaifUserCurrentClk);
++                }
++
++            }
++            break;
++        default:
++            ERROR(cdev, "USB audiofsioctl code:0x%x is not correct! \n", code);
++    }
++
++    return retValue;
++}
++
++static const struct file_operations gadgetfsoperations = {
++	.owner =	        THIS_MODULE,
++	.llseek =	        no_llseek,
++
++	.open =		        audiofsopen,
++	.write =	        audiofswrite,
++	.read =	                audiofsread,
++	.unlocked_ioctl =	audiofsioctl,
++	.release =	        audiofsrelease,
++};
++
++static struct inode *
++gadgetaudiofs_make_inode (struct super_block *sb,
++		void *data, const struct file_operations *fops,
++		int mode)
++{
++	struct inode *inode = new_inode (sb);
++
++	if (inode) {
++		inode->i_mode = mode;
++		inode->i_uid = default_uid;
++		inode->i_gid = default_gid;
++		inode->i_atime = inode->i_mtime = inode->i_ctime
++				= CURRENT_TIME;
++		inode->i_private = data;
++		inode->i_fop = fops;
++	}
++	return inode;
++}
++
++/* creates in fs root directory, so non-renamable and non-linkable.
++ * so inode and dentry are paired, until device reconfig.
++ */
++static struct inode *
++gadgetaudiofs_create_file (struct super_block *sb, char const *name,
++		void *data, const struct file_operations *fops,
++		struct dentry **dentry_p)
++{
++	struct dentry	*dentry;
++	struct inode	*inode;
++
++	dentry = d_alloc_name(sb->s_root, name);
++	if (!dentry)
++		return NULL;
++
++	inode = gadgetaudiofs_make_inode (sb, data, fops,
++			S_IFREG | (default_perm & S_IRWXUGO));
++	if (!inode) {
++		dput(dentry);
++		return NULL;
++	}
++	d_add (dentry, inode);
++	*dentry_p = dentry;
++	return inode;
++}
++
++static const struct super_operations gadgetaudio_fs_operations = {
++	.statfs =	simple_statfs,
++	.drop_inode =	generic_delete_inode,
++};
++
++static int
++gadgetaudiofs_fill_super (struct super_block *sb, void *opts, int silent)
++{
++	struct inode	*inode;
++	struct dentry	*d;
++
++
++	/* superblock */
++	sb->s_blocksize = PAGE_CACHE_SIZE;
++	sb->s_blocksize_bits = PAGE_CACHE_SHIFT;
++	sb->s_magic = GADGETAUDIOFS_MAGIC;
++	sb->s_op = &gadgetaudio_fs_operations;
++	sb->s_time_gran = 1;
++
++	/* root inode */
++	inode = gadgetaudiofs_make_inode (sb,
++			NULL, &simple_dir_operations,
++			S_IFDIR | S_IRUGO | S_IXUGO);
++	if (!inode)
++		goto enomem0;
++	inode->i_op = &simple_dir_inode_operations;
++	if (!(d = d_alloc_root (inode)))
++		goto enomem1;
++	sb->s_root = d;
++
++	/* bad idea for this */
++	theAudio->sb = sb;
++
++	if (!gadgetaudiofs_create_file (sb, theAudio->card.func.name,
++				theAudio, &gadgetfsoperations,
++				&theAudio->dentry))
++		goto enomem2;
++
++	return 0;
++
++enomem2:
++	dput (d);
++enomem1:
++	iput (inode);
++enomem0:
++	return -ENOMEM;
++}
++
++
++/* "mount -t gadgetaudiofs path /dev/gadgetaudio" ends up here */
++static int
++gadgetaudiofs_get_sb (struct file_system_type *t, int flags,
++		const char *path, void *opts, struct vfsmount *mnt)
++{
++	return get_sb_single (t, flags, opts, gadgetaudiofs_fill_super, mnt);
++}
++
++static void
++gadgetaudiofs_kill_sb (struct super_block *sb)
++{
++	kill_litter_super (sb);
++}
++
++static struct file_system_type gadgetaudiofs_type = {
++	.owner		= THIS_MODULE,
++	.name		= "gadgetaudiofs",
++	.get_sb		= gadgetaudiofs_get_sb,
++	.kill_sb	= gadgetaudiofs_kill_sb,
++};
++
+diff --git a/drivers/usb/gadget/u_audio.c b/drivers/usb/gadget/u_audio.c
+index 3b70a7a..bdd8c7e 100644
+--- a/drivers/usb/gadget/u_audio.c
++++ b/drivers/usb/gadget/u_audio.c
+@@ -193,6 +193,7 @@ try_again:
+ 	result = snd_pcm_lib_write(snd->substream, buf, frames);
+ 	if (result != frames) {
+ 		ERROR(card, "Playback error: %d\n", (int)result);
++		//msleep_interruptible(2);
+ 		set_fs(old_fs);
+ 		goto try_again;
+ 	}
+diff --git a/include/linux/usb/audio.h b/include/linux/usb/audio.h
+index c51200c..8fb9791 100644
+--- a/include/linux/usb/audio.h
++++ b/include/linux/usb/audio.h
+@@ -22,6 +22,7 @@
+ #define __LINUX_USB_AUDIO_H
+ 
+ #include <linux/types.h>
++#include <linux/ioctl.h>
+ 
+ /* bInterfaceProtocol values to denote the version of the standard used */
+ #define UAC_VERSION_1			0x00
+@@ -541,6 +542,28 @@ struct uac1_status_word {
+ 	__u8 bOriginator;
+ } __attribute__((packed));
+ 
++
++struct usbaudio_buffer_status{
++    /* all as bytes */
++    
++    __u32 playbackBufferTotalLen;
++    __u32 playbackBufferCurrentLen;
++    __u32 microphoneBufferTotalLen;
++    __u32 microphoneBufferCurrentLen;
++};
++
++struct usbaudio_saif_clock_control{
++    /* all as HZ  -1 as invalid */
++
++    __u32 saifCurrentClock;           /* read  */
++    __u32 saifNextClock;              /* write */
++
++};
++
++
++#define	USBAUDIO_BUFFER_STATUS_GET       _IOR('g', 200, struct usbaudio_buffer_status)
++#define	USBAUDIO_SAIF_CLOCK_CONTROL 	_IOWR('g', 201, struct usbaudio_saif_clock_control)
++
+ #ifdef __KERNEL__
+ 
+ struct usb_audio_control {
+diff --git a/sound/soc/mxs/mxs-pcm.c b/sound/soc/mxs/mxs-pcm.c
+index b4d7ca0..1f15c4e 100644
+--- a/sound/soc/mxs/mxs-pcm.c
++++ b/sound/soc/mxs/mxs-pcm.c
+@@ -215,7 +215,10 @@ static int mxs_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
+ 			memmove(runtime->dma_area + 1, runtime->dma_area,
+ 				prtd->appl_ptr_bytes - 1);
+ 		}
+-		mxs_dma_enable(prtd->dma_ch);
++		//mxs_dma_enable(prtd->dma_ch);
++		ret = mxs_dma_enable(prtd->dma_ch);
++		if (ret)
++		    printk(KERN_DEBUG "%s: dma ret is %d\n", __func__, ret);
+ 		break;
+ 
+ 	case SNDRV_PCM_TRIGGER_STOP:
